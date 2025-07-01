@@ -70,6 +70,7 @@ class WebotsSimulation(Simulation):
     """
 
     def __init__(self, scene, supervisor, coordinateSystem=ENU, *, timestep, **kwargs):
+        self.best_coverage = 0,0
         self.supervisor = supervisor
         self.coordinateSystem = coordinateSystem
         self.mode2D = scene.compileOptions.mode2D
@@ -110,7 +111,18 @@ class WebotsSimulation(Simulation):
         self.actions = [0,0]
         self.observation = np.zeros(7) # TODO Need to fix obs and initialziation
         self.ms = round(1000 * self.timestep)
+        
 
+        self.total_reward = 0
+        self.total_steps = 0
+        self.collisions = 0
+        self.time_elapsed = 0
+
+
+        self.room_width = 5.09    # meters — change as needed
+        self.room_length = 5.09   # meters — change as needed
+        self.granularity = 0.05    # meters (matches rounding precision)
+        self.total_spaces = int((self.room_width / self.granularity) * (self.room_length / self.granularity))
 
         super().__init__(scene, timestep=timestep, **kwargs)
 
@@ -245,7 +257,13 @@ class WebotsSimulation(Simulation):
                 controllerField.setSFString(obj.controller)
             elif obj.resetController:
                 webotsObj.restartController()
-
+    def get_coverage_metric(self):
+        # Number of unique positions visited
+        covered_count = len(self.covered_spaces)
+        # Coverage ratio (fraction of total spaces covered)
+        coverage_ratio = covered_count / self.total_spaces
+        # Optionally: return both count and percentage
+        return covered_count, coverage_ratio
     def step(self): # action should be some low level control commands for the robot
         if not self.enable_sensors: 
                # print("Protections failed sensors were not initialized before calling") 
@@ -259,7 +277,16 @@ class WebotsSimulation(Simulation):
         self.transform_vel()
         self.left_motor.setVelocity(self.actions[0]) 
         self.right_motor.setVelocity(self.actions[1])
+        
+        self.total_steps += 1
+        self.time_elapsed += self.timestep
+
+        if np.any(self.observation[2:] < 0.1):
+            self.collisions += 1
         self.supervisor.step(self.ms)
+        covered_count, coverage_ratio = self.get_coverage_metric()
+        if coverage_ratio > self.best_coverage[1]:
+            self.best_coverage = covered_count, coverage_ratio
 
 
     def init_step(self):
@@ -320,7 +347,13 @@ class WebotsSimulation(Simulation):
         return values
 
     def destroy(self):
+        
+        print(f"This is the metric: {self.metric()}")
         # Destroy adhoc objects generated at the beginning of the simulation
+        episode_length = 50
+        if (self.total_steps % episode_length==0):
+            print(self.total_spaces)
+            print(f"covered {self.best_coverage[0]} cells out of {self.total_spaces} ({self.best_coverage[1]*100:.2f})")
         for i in range(1, self.nextAdHocObjectId):
             name = self._getAdhocObjectName(i)
             node = self.supervisor.getFromDef(name)
@@ -331,31 +364,85 @@ class WebotsSimulation(Simulation):
     def _getAdhocObjectName(self, i: int) -> str:
         return f"SCENIC_ADHOC_{i}"
 
+    def metric(self):
+   
+        avg_reward = self.total_reward / self.total_steps if self.total_steps > 0 else 0
+        exploration = len(self.covered_spaces)
+        collision_rate = self.collisions / self.total_steps if self.total_steps > 0 else 0
+
+        score = avg_reward - 10 * collision_rate + 0.1 * exploration  
+
+        return {
+            "total_reward": self.total_reward,
+            "average_reward": avg_reward,
+            "steps": self.total_steps,
+            "time_elapsed": self.time_elapsed,
+            "collision_count": self.collisions,
+            "exploration_score": exploration,
+            "final_score": score
+        }
+    def get_coverage_reward(self, granularity, pos, circle: bool):
+        if not circle:
+            if pos not in self.covered_spaces:
+                self.covered_spaces.append(pos)
+                return 1
+            else:
+                return 0
+        else:
+            reward = 0
+            #important parameter
+            radius = .335/2
+            x_range = np.arange(pos[0] - radius - granularity, pos[0] + radius + granularity, granularity)
+            y_range = np.arange(pos[1] - radius - granularity, pos[1] + radius + granularity, granularity)
+            x_range_combined, y_range_combined = np.meshgrid(x_range, y_range, indexing="xy")
+            mask = (x_range_combined - pos[0])**2 + (y_range_combined - pos[1])**2 <= radius**2
+            circle_points = [
+                (
+                    round(granularity * round(x / granularity), 3),
+                    round(granularity * round(y / granularity), 3)
+                )
+                for x, y in np.vstack((x_range_combined[mask],
+                                    y_range_combined[mask])).T
+            ]
+            for point in circle_points:
+                if(point not in self.covered_spaces):
+                    reward += 1
+                    self.covered_spaces.append(point)
+            return reward
+    
 
     def get_reward(self): # "any dummy for now will be okay"
         """
         Calculate the reward based off of the current state
         """
+        pos = self.granularity * np.round(np.array(self.supervisor_node.getPosition()[:2]) / self.granularity) #need to verify
+        reward = 0
+        reward += self.get_coverage_reward(self.granularity, [pos[0], pos[1]], True)
         pos = np.array(self.supervisor_node.getPosition()[:2])
         pos = np.round(pos, decimals=2) 
         #TODO penalize the robo for running into objects
         #     need to devise better reward func!
         #     having some issue understanding/working with
         #     sensors
-        if [pos[0],pos[1]] not in self.covered_spaces:
-            self.covered_spaces.append([pos[0],pos[1]])
-            reward = 1
-        elif self.invalid_action:
-            reward = -100
-            self.invalid_action = False
-        elif (np.any(self.observation[2:] < 0.1) ): # if any distance sensor is low penalize
-            reward = -10
-        elif (self.bumper_left == 1) or (self.bumper_right == 0):
-             reward = -10  #always penalize bumper ? 
-        else:
-            reward = -1 
+        # if [pos[0],pos[1]] not in self.covered_spaces:
+        #     self.covered_spaces.append([pos[0],pos[1]])
+        #     reward = (len(self.covered_spaces)) + 1
+        # else:
+        #     reward = -1 
 
-        print(self.observation,"\n" ,reward)
+        if self.invalid_action:
+            reward += -100
+            self.invalid_action = False
+        if (np.any(self.observation[2:] < 0.1) ): # if any distance sensor is low penalize
+            velocity_magnitude = np.mean(np.abs([self.actions[0], self.actions[1]]))
+            reward += -abs(velocity_magnitude) #always penalize bumper ? 
+        elif self.bumper_left.getValue() == 1 or self.bumper_right.getValue() == 1:
+            velocity_magnitude = np.mean(np.abs([self.actions[0], self.actions[1]]))
+            reward += -abs(velocity_magnitude)
+        
+        # print(self.observation,"\n" ,reward)
+        self.total_reward += reward
+
         return reward
     
     def get_info(self):

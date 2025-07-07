@@ -31,6 +31,19 @@ from scenic.core.vectors import Vector
 from scenic.simulators.webots.utils import ENU, WebotsCoordinateSystem
 from controller import DistanceSensor
 
+file_path = "../../../../../../output.txt"
+
+def ptf(message):
+    #adds onto the file
+    with open(file_path, 'a') as f:
+        print(message, file=f)
+        
+def otf(message):
+    #wipes the file and prints message
+    with open(file_path, 'w') as f:
+        print(message, file=f)
+
+episodes = 0
 
 class WebotsSimulator(Simulator):
     """`Simulator` object for Webots.
@@ -38,7 +51,10 @@ class WebotsSimulator(Simulator):
     Args:
         supervisor: Supervisor node handle from the Webots Python API.
     """
-
+    episode_count = 0
+    current_simulation = None
+    last_avg_return = None
+    
     def __init__(self, supervisor):
         super().__init__()
         self.supervisor = supervisor
@@ -53,11 +69,14 @@ class WebotsSimulator(Simulator):
             raise RuntimeError("Webots world does not contain a WorldInfo node")
         system = worldInfo.getField("coordinateSystem").getSFString()
         self.coordinateSystem = WebotsCoordinateSystem(system)
+        print("testing output")
 
     def createSimulation(self, scene, **kwargs):
-        return WebotsSimulation(
+        self.episode_count += 1
+        self.current_simulation = WebotsSimulation(
             scene, self.supervisor, coordinateSystem=self.coordinateSystem, **kwargs
         )
+        return self.current_simulation
 
 
 class WebotsSimulation(Simulation):
@@ -67,10 +86,48 @@ class WebotsSimulation(Simulation):
         supervisor: Webots supervisor node used for the simulation. This is
             exposed for the use of scenarios which need to call Webots APIs
             directly; e.g. :scenic:`simulation().supervisor.setLabel({...})`.
+            
     """
+    # def calculate_result(objects):
+    #     total_area = 0
+    #     for length, width in objects:
+    #         total_area += length * width
+    #     result = 25 - total_area
+    #     return result
 
+    # Example: list of (length, width) tuples
+    # objects = [
+    #     (0.75, 2),    #couch
+    # ]
+    def compute_total_tiles(self):
+        room_area = self.room_width * self.room_length
+        object_area = sum(width * length for width, length in self.obj_dims)
+        cleanable_area = room_area - object_area
+
+        tile_area = self.granularity ** 2
+        total_tiles = int(cleanable_area / tile_area)
+        self.total_spaces = total_tiles
+        print(f"Computed total cleanable tiles: {total_tiles}")
+
+
+    # result = calculate_result(objects)
+    # total_tiles = (result * 2601)/25
+    # print(f"Result after subtracting total area from 25: {total_tiles}")
     def __init__(self, scene, supervisor, coordinateSystem=ENU, *, timestep, **kwargs):
+        self.obj_dims = []
+        # self.total_spaces = WebotsSimulation.total_tiles
+        self.total_spaces = 0
         self.best_coverage = 0,0
+        self.room_width = 5.09    # meters — change as needed
+        self.room_length = 5.09   # meters — change as needed
+        self.granularity = 0.05    # meters (matches rounding precision)
+        # self.total_spaces = (2 * np.floor(self.room_width / (2*self.granularity)) + 1)**2 - 4 #-4 for each of the corners
+        self.total_reward = 0
+        self.total_steps = 0
+        self.collisions = 0
+        self.collision_safeguard = 0
+        
+        self.time_elapsed = 0
         self.supervisor = supervisor
         self.coordinateSystem = coordinateSystem
         self.mode2D = scene.compileOptions.mode2D
@@ -82,6 +139,7 @@ class WebotsSimulation(Simulation):
         self.tmpMeshDir = tempfile.mkdtemp()
 
         self.supervisor_node = self.supervisor.getSelf()
+                
 
         self.left_motor = self.supervisor.getDevice("right wheel motor")
         self.right_motor = self.supervisor.getDevice("left wheel motor")
@@ -93,9 +151,8 @@ class WebotsSimulation(Simulation):
         self.sensor_front_left = self.supervisor.getDevice("cliff_front_left")
 
         self.sensor_back = self.supervisor.getDevice("cliff_back")
-
-        self.bumper_left = self.supervisor.getDevice("bumper_left")
-        self.bumper_right = self.supervisor.getDevice("bumper_right")
+        self.sensor_actual_left = self.supervisor.getDevice("actual_left")
+        self.sensor_actual_right = self.supervisor.getDevice("actual_right")
 
         self.left_motor.setPosition(float('inf'))
         self.right_motor.setPosition(float('inf'))
@@ -106,32 +163,28 @@ class WebotsSimulation(Simulation):
 
         self.covered_spaces = []
         self.invalid_action = False
+        self.total_reward = 0
 
         self.enable_sensors = False
         self.actions = [0,0]
-        self.observation = np.zeros(7) # TODO Need to fix obs and initialziation
         self.ms = round(1000 * self.timestep)
-        
 
-        self.total_reward = 0
-        self.total_steps = 0
-        self.collisions = 0
-        self.time_elapsed = 0
-
-
-        self.room_width = 5.09    # meters — change as needed
-        self.room_length = 5.09   # meters — change as needed
-        self.granularity = 0.05    # meters (matches rounding precision)
-        self.total_spaces = int((self.room_width / self.granularity) * (self.room_length / self.granularity))
-
+        self.sectional_coverage = np.zeros(16)
+        self.observation = {
+            "velocity": np.zeros(2), 
+            "sensor": np.zeros(7),
+            "position": np.zeros(2),
+            "orientation": np.zeros(4, dtype=np.float32)
+            # "sectional_coverage":np.zeros(16),
+            # "current_section": 0
+        } # TODO Need to fix obs and initialziation
         super().__init__(scene, timestep=timestep, **kwargs)
 
     def setup(self):
         super().setup()
-
         # Reset Webots simulation
         self.supervisor.simulationResetPhysics()
-
+        self.compute_total_tiles()
 
 
     def createObjectInSimulator(self, obj):
@@ -150,8 +203,6 @@ class WebotsSimulation(Simulation):
             objFilePath = path.join(self.tmpMeshDir, f"{self.nextAdHocObjectId}.obj")
             trimesh.exchange.export.export_mesh(objectScaledMesh, objFilePath)
 
-
-
             name = self._getAdhocObjectName(self.nextAdHocObjectId)
             protoName = (
                 "ScenicObjectWithPhysics" if isPhysicsEnabled(obj) else "ScenicObject"
@@ -167,7 +218,6 @@ class WebotsSimulation(Simulation):
                 }}
                 """
             )
-
             rootNode = self.supervisor.getRoot()
             rootChildrenField = rootNode.getField("children")
             rootChildrenField.importMFNodeFromString(-1, protoDef)
@@ -257,37 +307,57 @@ class WebotsSimulation(Simulation):
                 controllerField.setSFString(obj.controller)
             elif obj.resetController:
                 webotsObj.restartController()
+        # coverage
+        if hasattr(obj, 'width') and hasattr(obj, 'length'):
+            self.obj_dims.append((float(obj.width), float(obj.length)))
+                
     def get_coverage_metric(self):
         # Number of unique positions visited
         covered_count = len(self.covered_spaces)
         # Coverage ratio (fraction of total spaces covered)
         coverage_ratio = covered_count / self.total_spaces
         # Optionally: return both count and percentage
-        return covered_count, coverage_ratio
+        return covered_count, coverage_ratio          
+                
     def step(self): # action should be some low level control commands for the robot
         if not self.enable_sensors: 
                # print("Protections failed sensors were not initialized before calling") 
                # TODO more elegant fix here, sensor need to be adaquetly initialized before the simlation begins stepping
                 self.init_step()
 
-        # TODO Normalize observation space, docmumnet sensor value ranges, and signals for crashing etc...
-        self.observation = np.array([self.actions[0], self.actions[1], self.sensor_left.getValue()/800, self.sensor_right.getValue()/800, # ensures that null values are not returned from unintialized sensors
-                self.sensor_front_right.getValue()/800, self.sensor_front_left.getValue()/800, self.sensor_back.getValue()/800])       
+        self.total_steps += 1
+        rot = np.array(self.supervisor_node.getField("rotation").getSFVec2f(), dtype=np.float32)
+        pos = self.granularity * np.round(np.array(self.supervisor_node.getPosition()[:2]) / self.granularity)
 
+
+        # TODO Normalize observation space, docmumnet sensor value ranges, and signals for crashing etc...
+        self.observation = {
+            "velocity": np.array([self.actions[0], self.actions[1]]),
+            "sensor": np.array([self.sensor_left.getValue()/800, self.sensor_right.getValue()/800, # ensures that null values are not returned from unintialized sensors
+                self.sensor_front_right.getValue()/800, self.sensor_front_left.getValue()/800, self.sensor_back.getValue()/800, self.sensor_actual_left.getValue()/800,  
+                                     self.sensor_actual_right.getValue()/800]),       
+            "orientation": np.array([rot[0], rot[1], rot[2], rot[3]]),  # Includes full quaternion [x, y, z, w]
+            "position": np.array(pos)  # Normalize by room size if 5x5m
+            
+            # "position": np.array(pos), "rotation": np.array(rot[0], rot[1], rot[2], rot[3])
+            # "sectional_coverage": self.sectional_coverage / (self.total_spaces / 16),
+            # "current_section": self.posToIdx(pos)
+        }
         self.transform_vel()
         self.left_motor.setVelocity(self.actions[0]) 
         self.right_motor.setVelocity(self.actions[1])
-        
-        self.total_steps += 1
-        self.time_elapsed += self.timestep
-
-        if np.any(self.observation[2:] < 0.1):
-            self.collisions += 1
         self.supervisor.step(self.ms)
+        self.time_elapsed += self.timestep
         covered_count, coverage_ratio = self.get_coverage_metric()
         if coverage_ratio > self.best_coverage[1]:
             self.best_coverage = covered_count, coverage_ratio
 
+        if np.any(self.observation["sensor"][:5] < 0.1):
+            self.collisions += 1
+        # if(self.total_steps % 500 == 0) :
+        #     print("Step: " + str(self.total_steps))
+        #     print(f"Actions: {self.actions[0], self.actions[1]}")
+        #     print(f"Observations: {self.observation}")
 
     def init_step(self):
         """
@@ -299,12 +369,15 @@ class WebotsSimulation(Simulation):
         self.sensor_front_left.enable(self.ms)
         self.sensor_left.enable(self.ms)
 
-        self.bumper_left.enable(self.ms)
-        self.bumper_right.enable(self.ms)
 
         self.sensor_back.enable(self.ms)
 
+        self.sensor_actual_left.enable(self.ms)
+        self.sensor_actual_right.enable(self.ms)
+
         self.supervisor.step(self.ms) # Need to step the simulation once after initializing the sensors!
+        pos = self.granularity * np.round(np.array(self.supervisor_node.getPosition()[:2]) / self.granularity) #need to verify
+        self.pos = pos # initialize the position
         self.enable_sensors = True
 
 
@@ -345,32 +418,14 @@ class WebotsSimulation(Simulation):
             values["battery"] = val
 
         return values
-
-    def destroy(self):
-        
-        print(f"This is the metric: {self.metric()}")
-        # Destroy adhoc objects generated at the beginning of the simulation
-        episode_length = 50
-        if (self.total_steps % episode_length==0):
-            print(self.total_spaces)
-            print(f"covered {self.best_coverage[0]} cells out of {self.total_spaces} ({self.best_coverage[1]*100:.2f})")
-        for i in range(1, self.nextAdHocObjectId):
-            name = self._getAdhocObjectName(i)
-            node = self.supervisor.getFromDef(name)
-            if node is not None: # ensure that the node actually exisits in the simulation before destroying it
-                node.remove()
-            self.step() # TODO this fixe crashing error on repeated reset calls! I DO NOT KNOW WHY.... temp fix, need to figure out underlying cause
     
-    def _getAdhocObjectName(self, i: int) -> str:
-        return f"SCENIC_ADHOC_{i}"
-
     def metric(self):
-   
+
         avg_reward = self.total_reward / self.total_steps if self.total_steps > 0 else 0
         exploration = len(self.covered_spaces)
         collision_rate = self.collisions / self.total_steps if self.total_steps > 0 else 0
 
-        score = avg_reward - 10 * collision_rate + 0.1 * exploration  
+        score = avg_reward - 10 * collision_rate + 0.1 * exploration
 
         return {
             "total_reward": self.total_reward,
@@ -381,14 +436,43 @@ class WebotsSimulation(Simulation):
             "exploration_score": exploration,
             "final_score": score
         }
-    def get_coverage_reward(self, granularity, pos, circle: bool):
-        if not circle:
-            if pos not in self.covered_spaces:
-                self.covered_spaces.append(pos)
-                return 1
+
+    def destroy(self):
+        global episodes
+        episodes += 1
+        print(f"Episode number: {episodes}")
+        print(f"This is the metric: {self.metric()}")
+        print(f"Covered {self.best_coverage[0]} cells out of {self.total_spaces} ({self.best_coverage[1]*100:.2f}%)")
+        # Destroy adhoc objects generated at the beginning of the simulation
+        print(f" total episode reward was {self.total_reward}")
+
+        print(f"This is the metric: {self.metric()}")
+        print(f"Covered {self.best_coverage[0]} cells out of {self.total_spaces} ({self.best_coverage[1]*100:.2f}%) \n")
+
+        for i in range(1, self.nextAdHocObjectId):
+            name = self._getAdhocObjectName(i)
+            node = self.supervisor.getFromDef(name)
+            if node is not None: # ensure that the node actually exisits in the simulation before destroying it
+                node.remove()
+            self.supervisor.step(self.ms) # TODO this fixe crashing error on repeated reset calls! I DO NOT KNOW WHY.... temp fix, need to figure out underlying cause
+    def _getAdhocObjectName(self, i: int) -> str:
+        return f"SCENIC_ADHOC_{i}"
+    
+    def posToIdx(self, pos):
+        idx = np.array([0, 0])
+        for i in range(0, 2):
+            if(pos[i] <= self.room_width / 4 * -1):
+                idx[i] = 0
+            elif(pos[i] <= 0):
+                idx[i] = 1
+            elif(pos[i] <= self.room_width / 4):
+                idx[i] = 2
             else:
-                return 0
-        else:
+                idx[i] = 3
+        return 4 * idx[0] + idx[1]
+        
+
+    def get_coverage_reward(self, granularity, pos):
             reward = 0
             #important parameter
             radius = .335/2
@@ -408,43 +492,37 @@ class WebotsSimulation(Simulation):
                 if(point not in self.covered_spaces):
                     reward += 1
                     self.covered_spaces.append(point)
+                    self.sectional_coverage[self.posToIdx(pos)] += 1
+            if reward == 0:
+                reward += -.001
             return reward
-    
+        
 
     def get_reward(self): # "any dummy for now will be okay"
         """
         Calculate the reward based off of the current state
         """
         pos = self.granularity * np.round(np.array(self.supervisor_node.getPosition()[:2]) / self.granularity) #need to verify
-        reward = 0
-        reward += self.get_coverage_reward(self.granularity, [pos[0], pos[1]], True)
-        pos = np.array(self.supervisor_node.getPosition()[:2])
-        pos = np.round(pos, decimals=2) 
-        #TODO penalize the robo for running into objects
-        #     need to devise better reward func!
-        #     having some issue understanding/working with
-        #     sensors
-        # if [pos[0],pos[1]] not in self.covered_spaces:
-        #     self.covered_spaces.append([pos[0],pos[1]])
-        #     reward = (len(self.covered_spaces)) + 1
-        # else:
-        #     reward = -1 
-
+        pos = tuple(pos.tolist())
+        reward = self.get_coverage_reward(self.granularity, [pos[0], pos[1]])
+        
+        if np.all(self.observation["velocity"] > 0):
+            reward += .1 # small reward for driving forwa
+        
+        if (np.any(self.observation["sensor"][:5] < 0.1) ): # if any distance sensor is low penalize
+            reward += -1
+            self.collision_safeguard += 1
+        else:
+            self.collision_safeguard = 0
+        if self.collision_safeguard >= 90:
+            reward += -100
+        
         if self.invalid_action:
             reward += -100
+            print("Invalid action")
             self.invalid_action = False
-        if (np.any(self.observation[2:] < 0.1) ): # if any distance sensor is low penalize
-            velocity_magnitude = np.mean(np.abs([self.actions[0], self.actions[1]]))
-            reward += -abs(velocity_magnitude) #always penalize bumper ? 
-        elif self.bumper_left.getValue() == 1 or self.bumper_right.getValue() == 1:
-            velocity_magnitude = np.mean(np.abs([self.actions[0], self.actions[1]]))
-            reward += -abs(velocity_magnitude)
-        
-        # print(self.observation,"\n" ,reward)
         self.total_reward += reward
-
         return reward
-    
     def get_info(self):
         """
         Any information about the system/state that should be retained
@@ -465,14 +543,18 @@ class WebotsSimulation(Simulation):
         self.actions[0] = self.actions[0] * self.velocity_ranges[1] 
         self.actions[1] = self.actions[1] * self.velocity_ranges[1]
 
-        if np.any(np.abs(self.actions) > 16.139):
-            print("Error with velocity comp:")
+        if np.any(np.abs(self.actions) > self.velocity_ranges[1]):
+            #print("Error with velocity comp:")
             self.invalid_action = True
-            print(f"Actions: {self.actions[0], self.actions[1]}")
+            #print(f"Actions: {self.actions[0], self.actions[1]}")
             self.actions[0] = 0
             self.actions[1] = 0 # set invalid action to 0 instead
-
-            
+    
+    def get_truncation(self):
+        if self.collision_safeguard > 100:
+            return True
+        else:
+            return False
 
 def getFieldSafe(webotsObject, fieldName):
     """Get field from webots object. Return null if no such field exists.
@@ -508,4 +590,3 @@ def isPhysicsEnabled(webotsObject):
     if isinstance(webotsObject.webotsAdhoc, dict):
         return webotsObject.webotsAdhoc.get("physics", True)
     raise TypeError(f"webotsAdhoc must be None or a dictionary")
-

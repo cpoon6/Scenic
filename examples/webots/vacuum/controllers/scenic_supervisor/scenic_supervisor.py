@@ -13,6 +13,13 @@ from stable_baselines3 import SAC,PPO
 from stable_baselines3.common.monitor import Monitor
 
 
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.evaluation import evaluate_policy
+
+import matplotlib.pyplot as plt
+
+
+
  
 supervisor = Supervisor() # Collect the Supervisor node from the simulation
 simulator = WebotsSimulator(supervisor) # Create an instance of the WebotsSImulator with the corresponding node
@@ -26,8 +33,18 @@ scenario = scenic.scenarioFromFile(prefix +  "examples/webots/vacuum/vacuum.scen
 
 
 action_space = gym.spaces.Box(low=-1.0, high=1.0 ,shape=(2,))  # Defines the possible actions of the agent
-observation_space = gym.spaces.Box(low=np.array([-1,-1,0,0,0,0,0]), high=np.array([1,1,1,1,1,1,1]),shape=(7,),dtype=np.float64) # defines the range of observations of the agent
-max_steps = 5000
+array_size = 1 #find in simulator.py by ctrl f'ing array_size
+observation_space = gym.spaces.Dict({
+    "velocity": gym.spaces.Box(low=np.array([-1, -1]), high=np.array([1, 1]), shape=(2,),dtype=np.float64),
+    "sensor": gym.spaces.Box(low=np.array([0,0,0,0,0,0,0]), high=np.array([1,1,1,1,1,1,1]),shape=(7,),dtype=np.float64), # defines the range of observations of the agent
+    "position": gym.spaces.Box(low=np.array([-2.6, -2.6]), high=np.array([2.6, 2.6]), shape=(2,),dtype=np.float64),
+    "orientation": gym.spaces.Box(low=0.0, high = 3.0, shape=(4,), dtype=np.float32),
+    
+    
+    # "sectional_coverage": gym.spaces.Box(low=np.zeros(16), high=np.ones(16), shape=(16,),dtype=np.float64),
+    # "current_section": gym.spaces.Box(low=np.array([0]), high=np.array([15]), shape=(1,),dtype=int)
+})
+max_steps = 10000
 env = ScenicGymEnv(scenario, 
                    simulator, 
                    render_mode=None, 
@@ -36,31 +53,36 @@ env = ScenicGymEnv(scenario,
                    observation_space=observation_space) # max_step is max step for an episode - Create an enviroment instance
 env = Monitor(env)
 
-
-episodes=5
+episodes= 40
 total_timesteps = max_steps * episodes
-# print(total_timesteps)
+print(total_timesteps)
 
-model = PPO("MlpPolicy", env, verbose=2) # Create an instance of an agent 
-model.set_parameters("PPO_vacuum_agent")
+model = PPO("MultiInputPolicy", env, verbose=2) # Create an instance of an agent 
+# model.set_parameters("PPO_vacuum_agent")
 model.learn(total_timesteps=total_timesteps)          # train the agent over a set number of steps
-# model.save("PPO_vacuum_agent")               # Save the model after training
-# print(env.simulator.metric())
-rewards_per_step = np.array(env.get_episode_rewards()) / np.array(env.get_total_steps())
-negative = False
-for i in range(len(rewards_per_step)):
-    if rewards_per_step[i] <= 0:
-        negative = True
-        break
-if negative:
-    print("Negative reward, cannot find good slope measurement.")
-else:
-    total_pc = 0
-    for i in range(1, len(rewards_per_step)):
-        total_pc += (rewards_per_step[i] - rewards_per_step[i - 1]) / rewards_per_step[i - 1]
-    print("Average normalized percent difference: " + str(total_pc / (len(rewards_per_step) - 1)))
+model.save("PPO_vacuum_agent")               # Save the model after training
 
+mean_rwd, std_reward = evaluate_policy(model, env, n_eval_episodes=10,render=False)
+print(f"After evaluation mean reward was : {mean_rwd} with std: {std_reward}")
 
+episode_rewards = env.get_episode_rewards()
+print(episode_rewards)
+total_pc = 0
+for i in range(1, len(episode_rewards)):
+    total_pc += (episode_rewards[i] - episode_rewards[i - 1]) / np.abs(episode_rewards[i - 1])
+print("Average normalized percent difference: " + str(total_pc / (len(episode_rewards) - 1)))
+
+episodic_rewards = env.get_episode_rewards
+
+fig,ax = plt.subplots()
+
+ax.scatter(len(episodic_rewards), episodic_rewards)
+
+ax.set(xlim=(np.min(episodic_rewards+100)),
+       ylim=(np.max(episodic_rewards+100)))
+plt.show()
+file_name = "MLP_policy" + str(total_timesteps)  + ".png"
+plt.save(file_name,format='png')
 
 
 

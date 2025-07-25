@@ -1,4 +1,4 @@
-from scenic.core.simulators import Simulator, Simulation
+from scenic.core.simulators import Simulator, Simulation, TerminationType
 from scenic.core.scenarios import Scenario
 import gymnasium as gym
 from gymnasium import spaces
@@ -40,6 +40,11 @@ class ScenicGymEnv(gym.Env):
         self.record_scenic_sim_results = record_scenic_sim_results
         self.feedback_fn = feedback_fn
 
+        self.episode_coverages = []
+        self.episode_counter = 0
+
+
+
     def _make_run_loop(self):
 
         while True:
@@ -65,6 +70,8 @@ class ScenicGymEnv(gym.Env):
                         reward = simulation.get_reward()
 
                         if done():
+                            if simulation.result is None: # if simulation result is None, it means it was terminated early
+                               simulation.terminateSimulation(TerminationType.terminatedByUser, "early truncation") # can get rid of it doesn't work
                             self.feedback_result = self.feedback_fn(simulation.result)
                             if self.record_scenic_sim_results:
                                 self.simulation_results.append(simulation.result)
@@ -87,14 +94,27 @@ class ScenicGymEnv(gym.Env):
         else:
             observation, info = self.loop.throw(ResetException())
 
-
         return observation, info
         
     def step(self, action):
         assert not (self.loop is None), "self.loop is None, have you called reset()?"
 
         observation, reward, terminated, truncated, info = self.loop.send(action)
+
+        # print(f"[GymEnv.step] Info coverage: {info.get('coverage', 'MISSING')}")
+
+        # NEW: Extract coverage values from info
+        self.coverage = info.get("coverage", 0)
+        if terminated or truncated:
+            self.episode_coverages.append(self.coverage)
+            self.episode_counter += 1
+            
+
+
         return observation, reward, terminated, truncated, info
+
+    def get_coverage(self):
+        return sum(self.episode_coverages) / len(self.episode_coverages) if self.episode_coverages else 0 #avg
 
     def render(self): # TODO figure out if this function has to be implemented here or if super() has default implementation
         """

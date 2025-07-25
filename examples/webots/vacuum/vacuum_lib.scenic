@@ -23,6 +23,8 @@ class Vacuum(WebotsObject):
     Supervisor: True
     controller: "scenic_supervisor"
     resetController: False
+    reward : 0
+    
 
 # Floor uses builtin Webots floor to keep Vacuum Sensors from breaking
 # Not actually linked to WebotsObject because Webots floor is 2D
@@ -32,6 +34,7 @@ class Floor(Object):
     height: 0.01
     position: (0,0,-0.005)
     color: [0.785, 0.785, 0.785]
+    floor: 2
 
 class Wall(WebotsObject):
     webotsAdhoc: {'physics': False}
@@ -40,6 +43,14 @@ class Wall(WebotsObject):
     height: 0.5
     color: [0.627, 0.627, 0.627]
 
+
+
+class floor_test(WebotsObject):
+    webotsAdhoc: {'physics':False}
+    shape: MeshShape.fromFile(localPath("../../../assets/meshes/FLOOR.obj.bz2"),initial_rotation=(0,0,0))
+    width: 1
+    length: 1
+    
 
 class DiningTable(WebotsObject):
     webotsAdhoc: {'physics': True}

@@ -1,124 +1,227 @@
-import sys
-import os
-
-try:
-    current_script_dir = os.path.dirname(os.path.abspath(__file__))
-    scenic_src_path = os.path.normpath(os.path.join(current_script_dir, '..', '..', '..', '..', 'src'))
-    if scenic_src_path not in sys.path:
-        sys.path.insert(0, scenic_src_path)
-except Exception as e:
-    print(f"Warning: Could not add Scenic src to path. Error: {e}")
-
 from scenic.gym import ScenicGymEnv
 import scenic
+from scenic.simulators.newtonian_gym import NewtonianSimulator
 from scenic.simulators.webots import WebotsSimulator
+from controller import Supervisor
 
 import gymnasium as gym
 import numpy as np
+import matplotlib.pyplot as plt
+import time
+import gc
 
 from controller import Supervisor
+
+from stable_baselines3.common.env_checker import check_env
+from stable_baselines3 import SAC,PPO
+from stable_baselines3.common.monitor import Monitor
+
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.evaluation import evaluate_policy
 
 import matplotlib.pyplot as plt
-import time
-import gc
-from collections import deque
 
-# def adjust_clip_range(current_total_coverage_sum: float) -> float:
-#     input_val = -0.26 * current_total_coverage_sum + 5.2
-#     return input_val
 
+
+ 
+supervisor = Supervisor() # Collect the Supervisor node from the simulation
+simulator = WebotsSimulator(supervisor) # Create an instance of the WebotsSImulator with the corresponding node
+# ---------------- Setup ----------------
 start = time.time()
 
 supervisor = Supervisor()
 simulator = WebotsSimulator(supervisor)
 
 prefix = scenic.__file__[:-22]
+scenario = scenic.scenarioFromFile(prefix +  "examples/webots/vacuum/vacuum.scenic",
+                                   model="scenic.simulators.webots.model",
+                                   mode2D=False) # generate the scenario from the corresponding Scenic file
 
-action_space = gym.spaces.Box(low=-1.0, high=1.0 ,shape=(2,))
+
+scenic_file = prefix + "examples/webots/vacuum/vacuum.scenic"
+
+action_space = gym.spaces.Box(low=-1.0, high=1.0 ,shape=(2,))  # Defines the possible actions of the agent
+array_size = 1 #find in simulator.py by ctrl f'ing array_size
+action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(2,))
 observation_space = gym.spaces.Dict({
     "velocity": gym.spaces.Box(low=np.array([-1, -1]), high=np.array([1, 1]), shape=(2,),dtype=np.float64),
+    "sensor": gym.spaces.Box(low=np.array([0,0,0,0,0,0,0]), high=np.array([1,1,1,1,1,1,1]),shape=(7,),dtype=np.float64), # defines the range of observations of the agent
     "position": gym.spaces.Box(low=np.array([-2.6, -2.6]), high=np.array([2.6, 2.6]), shape=(2,),dtype=np.float64),
-    #"lidar": gym.spaces.Box(low=0.01, high=1, shape=(36,), dtype=np.float64),
-    #"rotation": gym.spaces.Box(low=np.array([-1,-1,-1,-1]), high=np.array([1,1,1,1]), shape=(4,), dtype=np.float64)
+    "orientation": gym.spaces.Box(low=0.0, high = 3.0, shape=(4,), dtype=np.float32),
+    
+    
+    # "sectional_coverage": gym.spaces.Box(low=np.zeros(16), high=np.ones(16), shape=(16,),dtype=np.float64),
+    # "current_section": gym.spaces.Box(low=np.array([0]), high=np.array([15]), shape=(1,),dtype=int)
+    "velocity": gym.spaces.Box(low=np.array([-1, -1]), high=np.array([1, 1]), shape=(2,), dtype=np.float64),
+    "sensor": gym.spaces.Box(low=np.zeros(7), high=np.ones(7), shape=(7,), dtype=np.float64),
+    "position": gym.spaces.Box(low=np.array([-2.6, -2.6]), high=np.array([2.6, 2.6]), shape=(2,), dtype=np.float64)
 })
 max_steps = 10000
-
-iterations = 50
-timesteps_per_itr = max_steps * 1
-
-scenario_template = scenic.scenarioFromFile(prefix + "examples/webots/vacuum/vacuum.scenic",
-                                 model="scenic.simulators.webots.model",
-                                 mode2D=False)
-
-training_env_unwrapped = ScenicGymEnv(scenario_template,
-                   simulator,
-                   render_mode=None,
-                   max_steps=max_steps,
+env = ScenicGymEnv(scenario, 
+                   simulator, 
+                   render_mode=None, 
+                   max_steps=max_steps, 
                    action_space=action_space,
-                   observation_space=observation_space,
-                #    feedback_fn=adjust_clip_range
-                   )
-training_env = Monitor(training_env_unwrapped)
+                   observation_space=observation_space) # max_step is max step for an episode - Create an enviroment instance
+env = Monitor(env)
 
-model = PPO("MultiInputPolicy", training_env, verbose=2, learning_rate=0.0002)
-model.save("PPO_vacuum_agent_initial")
+episodes= 40
+total_timesteps = max_steps * episodes
+print(total_timesteps)
 
-for i in range(iterations):
-    print(f"\n--- Training Progress: Iteration {i+1}/{iterations} ---")
+model = PPO("MultiInputPolicy", env, verbose=2) # Create an instance of an agent 
+# model.set_parameters("PPO_vacuum_agent")
+model.learn(total_timesteps=total_timesteps)          # train the agent over a set number of steps
+model.save("PPO_vacuum_agent")               # Save the model after training
 
-    model.learn(total_timesteps=timesteps_per_itr)
+mean_rwd, std_reward = evaluate_policy(model, env, n_eval_episodes=10,render=False)
+print(f"After evaluation mean reward was : {mean_rwd} with std: {std_reward}")
+# ---------------- Curriculum Function ----------------
+def choose_difficulty(coverage):
+    if coverage < 20:
+        return "easy"
+    elif coverage < 60:
+        return "medium"
+    else:
+        return "hard"
+# ---------------- Feedback Function ----------------
+
+def feedback_fn(result):
+    """
+    Feedback function for VerifAI CE sampler.
+    Returns (1 - coverage) so CE focuses on scenes where the vacuum performs worst.
+    """
+    print("feedback_fn called")
     
-    model.save("PPO_vacuum_agent_latest")
+    coverage = result.records["coverage"]
+    return coverage[1]
+    
 
+episode_rewards = env.get_episode_rewards()
+print(episode_rewards)
+total_pc = 0
+for i in range(1, len(episode_rewards)):
+    total_pc += (episode_rewards[i] - episode_rewards[i - 1]) / np.abs(episode_rewards[i - 1])
+print("Average normalized percent difference: " + str(total_pc / (len(episode_rewards) - 1)))
+# # ---------------- Training Loop ----------------
+episodes = 10
+max_steps = 10000
+difficulty = "easy"
+model = None
+
+episode_rewards = []
+difficulty_log = []
+
+for ep in range(episodes):
+    print(f"\n=== EPISODE {ep + 1} | DIFFICULTY: {difficulty.upper()} ===")
+    # Pass difficulty to Scenic
+    params = {
+        "is_easy": difficulty == "easy",
+        "is_medium": difficulty == "medium",
+        "is_hard": difficulty == "hard"
+    }
+
+    # Load Scenic scenario with current difficulty
+    scenario = scenic.scenarioFromFile(
+        scenic_file,
+        mode2D=False,
+        params=params
+    )
+
+    # Create environment
+    env = Monitor(ScenicGymEnv(
+        scenario,
+        simulator,
+        render_mode=None,
+        max_steps=max_steps,
+        action_space=action_space,
+        observation_space=observation_space,
+        feedback_fn =feedback_fn ))
+    # model = PPO("MultiInputPolicy", env, verbose=2, learning_rate=0.0002, ent_coef=0.05)
+    # model = PPO.load("PPO_vacuum_final", env=env)
+    # model.set_parameters("PPO_vacuum_agent")
+    if ep==0:
+        model = PPO("MultiInputPolicy", env, verbose=2, learning_rate=0.0002, ent_coef=0.05)
+    else:
+        model = PPO.load("PPO_vacuum_final", env=env)
+    #     model.set_parameters("PPO_vacuum_agent")
+        
+
+    # Load or reuse model
+    
+
+    episodic_rewards = env.get_episode_rewards
+    # Train for one episode
+    print("starting learning")
+    model.learn(total_timesteps=max_steps)
+    print("finish learning")
+
+    # Evaluate and track reward
+    rewards = env.get_episode_rewards()
+    last_reward = rewards[-1] if rewards else 0
+    episode_rewards.append(last_reward)
+
+    # Estimate coverage and update difficulty
+# Make sure these are coming from the environment
+    coverage = env.env.get_coverage()
+    print(f"The coverage is {coverage:.2f}%")
+    difficulty = choose_difficulty(coverage)
+    difficulty_log.append(difficulty)
+
+    # Clean up
+    del env
+    model.save("PPO_vacuum_final")
+
+    del model
     gc.collect()
+    
 
-total_timesteps = iterations * timesteps_per_itr
-print(f"\nTraining completed. Total timesteps trained: {total_timesteps}")
+fig,ax = plt.subplots()
 
-print("\n--- Starting Evaluation ---")
-scenario_eval = scenic.scenarioFromFile(prefix + "examples/webots/vacuum/vacuum.scenic",
-                                 model="scenic.simulators.webots.model",
-                                 mode2D=False)
+ax.scatter(len(episodic_rewards), episodic_rewards)
+# ---------------- Save Model ----------------
 
-eval_env = ScenicGymEnv(scenario_eval,
-                            simulator,
-                            render_mode=None,
-                            max_steps=max_steps,
-                            action_space=action_space,
-                            observation_space=observation_space
-                            )
-eval_env = Monitor(eval_env)
-
-final_model = PPO.load("PPO_vacuum_agent_latest.zip")
-final_model.set_env(eval_env)
-
-mean_rwd, std_reward = evaluate_policy(final_model, eval_env, n_eval_episodes=50, render=False, deterministic=False)
-print(f"After evaluation mean reward was : {mean_rwd:.2f} with std: {std_reward:.2f}")
-
-episodic_rewards = eval_env.get_episode_rewards()
-print(f"Episodic Rewards (Evaluation): {episodic_rewards}")
-
-if len(episodic_rewards) > 1:
-    total_pc = 0
-    for j in range(1, len(episodic_rewards)):
-        if np.abs(episodic_rewards[j - 1]) > 1e-6:
-            total_pc += (episodic_rewards[j] - episodic_rewards[j - 1]) / np.abs(episodic_rewards[j - 1])
-    print(f"Average normalized percent difference: {total_pc / (len(episodic_rewards) - 1):.4f}")
-else:
-    print("Not enough episodes for average normalized percent difference calculation.")
-
+ax.set(xlim=(np.min(episodic_rewards+100)),
+       ylim=(np.max(episodic_rewards+100)))
+# ---------------- Plot Reward ----------------
 fig, ax = plt.subplots()
-ax.stem(range(len(episodic_rewards)), episodic_rewards)
-plt.title(f"Episodic Rewards During Evaluation (Total Timesteps: {total_timesteps})")
-plt.xlabel("Episode Number")
-plt.ylabel("Total Reward")
-file_name = f"PPO_policy_{total_timesteps}.png"
-plt.savefig(file_name, format='png')
+ax.stem(range(1, len(episode_rewards) + 1), episode_rewards)
+ax.set_title("Episode Rewards (Coverage Proxy)")
+ax.set_xlabel("Episode")
+ax.set_ylabel("Reward")
+plt.savefig("PPO_curriculum_rewards.png")
 plt.show()
+file_name = "MLP_policy" + str(total_timesteps)  + ".png"
+plt.save(file_name,format='png')
 
-end = time.time()
-print(f"Total script execution time: {(end - start) / 60:.2f} minutes")
+
+
+
+# ---------------- Final Evaluation ----------------
+# Reload final environment (e.g., using last difficulty)
+params = {
+    "is_easy": difficulty == "easy",
+    "is_medium": difficulty == "medium",
+    "is_hard": difficulty == "hard"
+}
+scenario = scenic.scenarioFromFile(
+    scenic_file,
+    mode2D=False,
+    params=params
+)
+env = Monitor(ScenicGymEnv(
+    scenario,
+    simulator,
+    render_mode=None,
+    max_steps=max_steps,
+    action_space=action_space,
+    observation_space=observation_space,
+    feedback_fn=feedback_fn
+))
+model = PPO.load("PPO_vacuum_final", env=env)
+
+mean_rwd, std_rwd = evaluate_policy(model, env, n_eval_episodes=10, render=False, deterministic=False)
+print(f"\nFinal evaluation — Mean reward: {mean_rwd:.2f}, Std: {std_rwd:.2f}")
+print(f"Total training time: {(time.time() - start) / 60:.2f} minutes")

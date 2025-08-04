@@ -2,7 +2,7 @@ from scenic.gym import ScenicGymEnv
 import scenic
 from scenic.simulators.newtonian_gym import NewtonianSimulator
 from scenic.simulators.webots import WebotsSimulator
-from controller import Supervisor
+# from controller import Supervisor
 
 import gymnasium as gym
 import numpy as np
@@ -31,8 +31,8 @@ simulator = WebotsSimulator(supervisor) # Create an instance of the WebotsSImula
 # ---------------- Setup ----------------
 start = time.time()
 
-supervisor = Supervisor()
-simulator = WebotsSimulator(supervisor)
+# supervisor = Supervisor()
+# simulator = WebotsSimulator(supervisor)
 
 prefix = scenic.__file__[:-22]
 scenario = scenic.scenarioFromFile(prefix +  "examples/webots/vacuum/vacuum.scenic",
@@ -49,35 +49,35 @@ observation_space = gym.spaces.Dict({
     "velocity": gym.spaces.Box(low=np.array([-1, -1]), high=np.array([1, 1]), shape=(2,),dtype=np.float64),
     "sensor": gym.spaces.Box(low=np.array([0,0,0,0,0,0,0]), high=np.array([1,1,1,1,1,1,1]),shape=(7,),dtype=np.float64), # defines the range of observations of the agent
     "position": gym.spaces.Box(low=np.array([-2.6, -2.6]), high=np.array([2.6, 2.6]), shape=(2,),dtype=np.float64),
-    "orientation": gym.spaces.Box(low=0.0, high = 3.0, shape=(4,), dtype=np.float32),
+    # "orientation": gym.spaces.Box(low=0.0, high = 3.0, shape=(4,), dtype=np.float32),
     
     
     # "sectional_coverage": gym.spaces.Box(low=np.zeros(16), high=np.ones(16), shape=(16,),dtype=np.float64),
     # "current_section": gym.spaces.Box(low=np.array([0]), high=np.array([15]), shape=(1,),dtype=int)
-    "velocity": gym.spaces.Box(low=np.array([-1, -1]), high=np.array([1, 1]), shape=(2,), dtype=np.float64),
-    "sensor": gym.spaces.Box(low=np.zeros(7), high=np.ones(7), shape=(7,), dtype=np.float64),
-    "position": gym.spaces.Box(low=np.array([-2.6, -2.6]), high=np.array([2.6, 2.6]), shape=(2,), dtype=np.float64)
+    # "velocity": gym.spaces.Box(low=np.array([-1, -1]), high=np.array([1, 1]), shape=(2,), dtype=np.float64),
+    # "sensor": gym.spaces.Box(low=np.zeros(7), high=np.ones(7), shape=(7,), dtype=np.float64),
+    # "position": gym.spaces.Box(low=np.array([-2.6, -2.6]), high=np.array([2.6, 2.6]), shape=(2,), dtype=np.float64)
 })
-max_steps = 10000
-env = ScenicGymEnv(scenario, 
-                   simulator, 
-                   render_mode=None, 
-                   max_steps=max_steps, 
-                   action_space=action_space,
-                   observation_space=observation_space) # max_step is max step for an episode - Create an enviroment instance
-env = Monitor(env)
+# max_steps = 10000
+# env = ScenicGymEnv(scenario, 
+#                    simulator, 
+#                    render_mode=None, 
+#                    max_steps=max_steps, 
+#                    action_space=action_space,
+#                    observation_space=observation_space) # max_step is max step for an episode - Create an enviroment instance
+# env = Monitor(env)
 
-episodes= 40
-total_timesteps = max_steps * episodes
-print(total_timesteps)
+# episodes= 40
+# total_timesteps = max_steps * episodes
+# print(total_timesteps)
 
-model = PPO("MultiInputPolicy", env, verbose=2) # Create an instance of an agent 
-# model.set_parameters("PPO_vacuum_agent")
-model.learn(total_timesteps=total_timesteps)          # train the agent over a set number of steps
-model.save("PPO_vacuum_agent")               # Save the model after training
+# model = PPO("MultiInputPolicy", env, verbose=2) # Create an instance of an agent 
+# # model.set_parameters("PPO_vacuum_agent")
+# model.learn(total_timesteps=total_timesteps)          # train the agent over a set number of steps
+# model.save("PPO_vacuum_agent")               # Save the model after training
 
-mean_rwd, std_reward = evaluate_policy(model, env, n_eval_episodes=10,render=False)
-print(f"After evaluation mean reward was : {mean_rwd} with std: {std_reward}")
+# mean_rwd, std_reward = evaluate_policy(model, env, n_eval_episodes=10,render=False)
+# print(f"After evaluation mean reward was : {mean_rwd} with std: {std_reward}")
 # ---------------- Curriculum Function ----------------
 def choose_difficulty(coverage):
     if coverage < 20:
@@ -99,12 +99,12 @@ def feedback_fn(result):
     return coverage[1]
     
 
-episode_rewards = env.get_episode_rewards()
-print(episode_rewards)
-total_pc = 0
-for i in range(1, len(episode_rewards)):
-    total_pc += (episode_rewards[i] - episode_rewards[i - 1]) / np.abs(episode_rewards[i - 1])
-print("Average normalized percent difference: " + str(total_pc / (len(episode_rewards) - 1)))
+# episode_rewards = env.get_episode_rewards()
+# print(episode_rewards)
+# total_pc = 0
+# for i in range(1, len(episode_rewards)):
+#     total_pc += (episode_rewards[i] - episode_rewards[i - 1]) / np.abs(episode_rewards[i - 1])
+# print("Average normalized percent difference: " + str(total_pc / (len(episode_rewards) - 1)))
 # # ---------------- Training Loop ----------------
 episodes = 10
 max_steps = 10000

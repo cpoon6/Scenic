@@ -159,6 +159,7 @@ class WebotsSimulation(Simulation):
             "velocity": np.zeros(2), 
             "sensor": np.zeros(7),
             "position": np.zeros(2),
+            "rotation": [0,0,0,0],
             # "sectional_coverage":np.zeros(16),
             # "current_section": 0
         } # TODO Need to fix obs and initialziation        
@@ -329,6 +330,8 @@ class WebotsSimulation(Simulation):
         self.total_steps += 1
         global saved_stepcount
         saved_stepcount += 1
+        rot = np.array(self.supervisor_node.getField("rotation").getSFVec2f(), dtype=np.float32)
+
         pos = self.granularity * np.round(np.array(self.supervisor_node.getPosition()[:2]) / self.granularity)
         # TODO Normalize observation space, docmumnet sensor value ranges, and signals for crashing etc...
         self.observation = {
@@ -337,6 +340,7 @@ class WebotsSimulation(Simulation):
                 self.sensor_front_right.getValue()/800, self.sensor_front_left.getValue()/800, self.sensor_back.getValue()/800, self.sensor_actual_left.getValue()/800,  
                                      self.sensor_actual_right.getValue()/800]),       
             "position": np.array(pos),
+             "rotation"   : np.array([rot[0], rot[1], rot[2], rot[3]]),
             # "sectional_coverage": self.sectional_coverage / (self.total_spaces / 16),
             # "current_section": self.posToIdx(pos)
         }
@@ -612,10 +616,11 @@ class WebotsSimulation(Simulation):
             self.actions[1] = 0 # set invalid action to 0 instead
     
     def get_truncation(self):
-        if self.collision_safeguard > 1000:
-            return True
-        else:
-            return False
+        # if self.collision_safeguard > 1000:
+        #     return True
+        # else:
+        #     return False
+        return False
 
 def getFieldSafe(webotsObject, fieldName):
     """Get field from webots object. Return null if no such field exists.
